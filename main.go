@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -15,6 +16,14 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
+
+/**
+ * bodyReq is a struct to hold request body
+ * @property Digit int `json:"digit"`
+ */
+type BodyReq struct {
+	Digit int `json:"digit"`
+}
 
 /**
  * initRedis is a function to initialize redis client
@@ -64,7 +73,17 @@ func generateRandomNumber(digit int) string {
 	return strconv.Itoa(randomNum)
 }
 
-func generateUniqueNumber(ctx context.Context, digit int, rdb *redis.Client) (string, error) {
+func generateUniqueNumber(digit int) (string, error) { // set context with timeout
+	// Set context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// init redis
+	rdb := initRedis()
+
+	// check redis connection
+	checkRedisConnection(ctx, rdb)
+
 	// Generate a new random number
 	randomNumber := generateRandomNumber(digit)
 	key := fmt.Sprintf("random_number:%s", randomNumber)
@@ -79,22 +98,12 @@ func generateUniqueNumber(ctx context.Context, digit int, rdb *redis.Client) (st
 		return randomNumber, nil
 	}
 
-	return generateUniqueNumber(ctx, digit, rdb)
+	return generateUniqueNumber(digit)
 }
 
 func handleGenerateNumber(req events.LambdaFunctionURLRequest) events.LambdaFunctionURLResponse {
-	// set context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// init redis
-	rdb := initRedis()
-
-	// check redis connection
-	checkRedisConnection(ctx, rdb)
-
 	// set digits from query string
-	digits := 1
+	digit := 1
 	if req.RawQueryString != "" {
 		// Parse the raw query string
 		values, err := url.ParseQuery(req.RawQueryString)
@@ -102,39 +111,68 @@ func handleGenerateNumber(req events.LambdaFunctionURLRequest) events.LambdaFunc
 			// Access the 'd' parameter
 			if d, exists := values["d"]; exists && len(d) > 0 {
 				if parsedDigits, err := strconv.Atoi(d[0]); err == nil {
-					digits = parsedDigits
+					digit = parsedDigits
 				}
 			}
 		}
 	}
 
 	// generate number
-	rand, err := generateUniqueNumber(ctx, digits, rdb)
+	rand, err := generateUniqueNumber(digit)
 	if err != nil {
 		fmt.Println("Error generating number:", err)
 	}
 
+	fmt.Println("Random Number:", rand)
+
 	return events.LambdaFunctionURLResponse{
 		StatusCode: 200,
 		Body:       rand,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
 	}
 }
-func handler(req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
-	path := req.RequestContext.HTTP.Path
 
-	var response events.LambdaFunctionURLResponse
-
-	switch path {
-	case "/api/generate":
-		response = handleGenerateNumber(req)
-	default:
-		response = events.LambdaFunctionURLResponse{
-			StatusCode: 404,
-			Body:       "URL Not Found",
+func handleRunGenerate(req events.LambdaFunctionURLRequest) events.LambdaFunctionURLResponse {
+	// Get body request
+	var bodyReq BodyReq
+	err := json.Unmarshal([]byte(req.Body), &bodyReq)
+	if err != nil {
+		return events.LambdaFunctionURLResponse{
+			StatusCode: 400,
+			Body:       "Invalid request body",
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
 		}
 	}
 
-	return response, nil
+	// generate number
+	rand, err := generateUniqueNumber(bodyReq.Digit)
+	if err != nil {
+		fmt.Println("Error generating number:", err)
+	}
+
+	fmt.Println("Random Number:", rand)
+
+	return events.LambdaFunctionURLResponse{
+		StatusCode: 200,
+		Body:       rand,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+}
+
+func handler(req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+	switch req.RequestContext.HTTP.Path {
+	case "/generate":
+		return handleGenerateNumber(req), nil
+	case "/run-generate":
+		return handleRunGenerate(req), nil
+	}
+	return handleGenerateNumber(req), nil
 }
 
 func main() {
